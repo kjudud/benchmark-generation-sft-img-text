@@ -1,0 +1,20 @@
+{
+  "lora": {
+    "file": "/home/jy/projects_wsl/00.Qwen3-VL-train/20260112_industry_6792000_qa_lora_results.json",
+    "num_samples": 14,
+    "scores": {
+      "answer_relevancy": 0.45997387695900455,
+      "faithfulness": 0.537569573283859,
+      "nv_context_relevance": 0.9642857142857143
+    }
+  },
+  "plain": {
+    "file": "/home/jy/projects_wsl/00.Qwen3-VL-train/20260112_industry_6792000_qa_plain_results.json",
+    "num_samples": 14,
+    "scores": {
+      "answer_relevancy": 0.38858409429060353,
+      "faithfulness": 0.511904761904762,
+      "nv_context_relevance": 0.75
+    }
+  }
+}

@@ -1,0 +1,11 @@
+# lora 학습용
+unsloth
+transformers==4.57.1
+trl==0.22.2
+
+# Ragas 기반 QA 결과 비교용
+ragas>=0.2.0
+datasets>=2.14.0
+pandas
+openai>=1.0.0
+langchain-openai
