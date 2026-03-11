@@ -69,7 +69,7 @@ python scripts/dataset/check_training_dataset.py
 ### 3. LoRA 학습
 
 ```bash
-python scripts/training/qwen3_vl_8b_training.py
+python scripts/train/qwen3_vl_8b_training.py
 ```
 
 학습된 어댑터는 `models/qwen3-vl-8b-sft/`에 저장됩니다.
