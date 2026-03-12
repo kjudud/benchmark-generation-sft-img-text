@@ -69,7 +69,10 @@ def prepare_dataset_from_qa(ds_qa):
 
             # Assistant: QA (query + answer)
             assistant_content = [
-                {"type": "text", "text": f"질문: {query}\n답변: {answer}"}
+                {
+                    "type": "text",
+                    "text": f'{{"question": "{query}", "answer": "{answer}"}}',
+                }
             ]
 
             conversation = [
@@ -116,7 +119,7 @@ def main():
     FastVisionModel.for_training(model)  # Enable for training!
 
     # 모델 저장 경로 설정
-    model_output_dir = "models/qwen3-vl-8b-sftsdf"
+    model_output_dir = "models/qwen3-vl-8b-sft"
 
     trainer = SFTTrainer(
         model=model,
@@ -138,7 +141,7 @@ def main():
             max_grad_norm=1.0,  # Gradient clipping
             # 로깅 및 저장 설정
             logging_steps=10,
-            save_steps=500,  # 500 스텝마다 체크포인트 저장
+            save_steps=75,  # 500 스텝마다 체크포인트 저장
             save_total_limit=3,  # 최대 3개의 체크포인트만 유지
             save_strategy="steps",
             logging_strategy="steps",
@@ -153,7 +156,7 @@ def main():
             remove_unused_columns=False,
             dataset_text_field="",
             dataset_kwargs={"skip_prepare_dataset": True},
-            max_length=2048,  # 최대 시퀀스 길이
+            max_length=4096,  # 최대 시퀀스 길이 (입력 + 출력 합산)
         ),
     )
 
