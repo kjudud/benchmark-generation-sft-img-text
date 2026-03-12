@@ -96,8 +96,7 @@ def create_qa_prompt(
     question_type: str = "Factual Question",
     type_value: str = "visual",
 ) -> str:
-    """학습 시와 동일한 QA 생성 프롬프트를 반환합니다."""
-    return f"""당신은 대화를 시작하기 위한 1개의 후보 질문을 생성하는 사용자 시뮬레이터입니다.
+    prompt = f"""당신은 대화를 시작하기 위한 1개의 후보 질문을 생성하는 사용자 시뮬레이터입니다.
 질문은 지금 제공될 문서에 포함된 **사실 정보**를 기반으로 해야 합니다. 질문을 생성할 때, 시뮬레이션되는 실제 사용자와 질문을 읽는 독자는 **이 문서에 직접 접근할 수 없다고 가정**하세요. 따라서 문서의 저자, 출처, 또는 '이 문서에서는'과 같은 표현을 사용하지 마세요.
 각 질문은 **독립적으로 읽혀도 이해 가능해야 하며**, 서로 **내용과 관점이 다르게** 구성되어야 합니다. 서문이나 설명 없이 **질문과 답변만** 반환하세요.
 
@@ -119,6 +118,7 @@ def create_qa_prompt(
 생성된 각 질문은 다음 특성을 가져야 합니다:
 - {question_type}
 - {type_value}"""
+    return prompt
 
 
 def _load_config(path: str, default: dict) -> dict:
@@ -129,7 +129,7 @@ def _load_config(path: str, default: dict) -> dict:
     return default
 
 
-def load_model(model_path: str = "./models/qwen3-vl-8b-sft"):
+def load_model(model_path: str = "models/qwen3-vl-8b-sft"):
     """
     LoRA 어댑터가 적용된 모델과 토크나이저를 로드합니다.
 
@@ -206,35 +206,39 @@ def generate_qa(
     user_content = [{"type": "image", "image": img} for img in ocr_images]
     user_content.append({"type": "text", "text": prompt})
 
+    messages = [{"role": "user", "content": user_content}]
+
+    # 추론 실행
     inputs = tokenizer.apply_chat_template(
-        [{"role": "user", "content": user_content}],
+        messages,
         tokenize=True,
         add_generation_prompt=True,
         return_dict=True,
         return_tensors="pt",
     ).to(model.device)
 
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            do_sample=temperature > 0,
-            pad_token_id=tokenizer.eos_token_id,
-        )
+    generation_config = {
+        "max_new_tokens": max_new_tokens,
+        "temperature": temperature,
+        "top_p": top_p,
+        "do_sample": True if temperature > 0 else False,
+        "pad_token_id": tokenizer.eos_token_id,
+    }
 
-    # 입력 토큰을 제외한 생성 부분만 디코딩
-    return tokenizer.decode(
-        outputs[0][inputs["input_ids"].shape[1]:],
-        skip_special_tokens=True,
+    with torch.no_grad():
+        outputs = model.generate(**inputs, **generation_config)
+
+    generated_text = tokenizer.decode(
+        outputs[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True
     )
+
+    return generated_text
 
 
 def main():
     parser = argparse.ArgumentParser(description="Qwen3-VL LoRA 모델로 QA 생성")
     parser.add_argument("--input-dir", type=str, required=True, help="OCR 출력 디렉토리 경로")
-    parser.add_argument("--model-path", type=str, default="./models/qwen3-vl-8b-sft", help="학습된 모델 경로")
+    parser.add_argument("--model-path", type=str, default="models/qwen3-vl-8b-sft", help="학습된 모델 경로")
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.9)

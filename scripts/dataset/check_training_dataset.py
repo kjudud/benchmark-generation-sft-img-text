@@ -12,7 +12,7 @@ print(f"📥 데이터셋 로드 중: {dataset_path}")
 ds = load_from_disk(dataset_path)
 
 # 이미지 저장 디렉토리 생성
-output_dir = "./check_images"
+output_dir = "datasets/check_images"
 os.makedirs(output_dir, exist_ok=True)
 print(f"📁 이미지 저장 디렉토리: {output_dir}")
 
