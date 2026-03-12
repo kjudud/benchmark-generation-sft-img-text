@@ -1,17 +1,22 @@
 # =============================================================================
 # Model & Training
 # =============================================================================
-models/
+models/*
+!models/.gitkeep
 unsloth_compiled_cache/
 *.jpg
 *.png
 # =============================================================================
 # Datasets & OCR Output (large binary/generated files)
 # =============================================================================
-datasets/
-test_data/
-SDS-KoPub-VDR-sample/
-ocr_output/
+datasets/*
+!datasets/.gitkeep
+test_data/*
+!test_data/.gitkeep
+SDS-KoPub-VDR-sample/*
+!SDS-KoPub-VDR-sample/.gitkeep
+ocr_output/*
+!ocr_output/.gitkeep
 
 # =============================================================================
 # Result files (generated at runtime)
