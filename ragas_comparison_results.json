@@ -1,20 +1,20 @@
 {
   "lora": {
-    "file": "/home/jy/projects_wsl/00.Qwen3-VL-train/20260112_industry_6792000_qa_lora_results.json",
+    "file": "results/lora_32b_results.json",
     "num_samples": 14,
     "scores": {
-      "answer_relevancy": 0.45997387695900455,
-      "faithfulness": 0.537569573283859,
-      "nv_context_relevance": 0.9642857142857143
+      "answer_relevancy": 0.5027389137486752,
+      "faithfulness": 0.6821428571428572,
+      "nv_context_relevance": 0.7321428571428571
     }
   },
-  "plain": {
-    "file": "/home/jy/projects_wsl/00.Qwen3-VL-train/20260112_industry_6792000_qa_plain_results.json",
+  "base": {
+    "file": "results/base_32b_results.json",
     "num_samples": 14,
     "scores": {
-      "answer_relevancy": 0.38858409429060353,
-      "faithfulness": 0.511904761904762,
-      "nv_context_relevance": 0.75
+      "answer_relevancy": 0.516004225046273,
+      "faithfulness": 0.6,
+      "nv_context_relevance": 0.7857142857142857
     }
   }
 }

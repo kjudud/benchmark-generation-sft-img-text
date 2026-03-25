@@ -17,7 +17,8 @@ SDS-KoPub-VDR-sample/*
 !SDS-KoPub-VDR-sample/.gitkeep
 ocr_output/*
 !ocr_output/.gitkeep
-
+results/*
+!results/.gitkeep
 # =============================================================================
 # Result files (generated at runtime)
 # =============================================================================

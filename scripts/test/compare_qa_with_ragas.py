@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Ragas를 사용해 LoRA 결과와 Plain 결과 JSON의 QA 성능을 비교하는 스크립트.
+Ragas를 사용해 LoRA 결과와 Base 결과 JSON의 QA 성능을 비교하는 스크립트.
 
 Context: 각 페이지는 이미지(들)와 대응하는 OCR 텍스트(result.mmd)가 있습니다.
   - JSON의 input_dir(예: test_data/20260112_industry_6792000) 아래에 0001, 0002, ... 폴더
@@ -52,7 +52,7 @@ def load_page_context(
 
 def load_qa_from_lora_json(path: str) -> tuple[list[dict], str]:
     """
-    LoRA 결과 JSON에서 QA 리스트 추출. qa 필드 형식: '질문: ...\\n답변: ...'
+    LoRA 결과 JSON에서 QA 리스트 추출. qa 필드 형식: '{"question": "...", "answer": "..."}'
     Returns:
         (rows, input_dir). 각 row는 question, answer, page 포함.
     """
@@ -63,19 +63,31 @@ def load_qa_from_lora_json(path: str) -> tuple[list[dict], str]:
     for p in data.get("pages", []):
         qa = p.get("qa") or ""
         page = p.get("page", 0)
-        if "\n답변:" in qa:
-            q, a = qa.split("\n답변:", 1)
-            question = q.replace("질문:", "").strip()
-            answer = a.strip()
-        else:
-            question, answer = qa.strip(), ""
+        question, answer = "", ""
+        try:
+            # JSON 형식: {"question": "...", "answer": "..."}
+            parsed = json.loads(qa)
+            question = parsed.get("question", "").strip()
+            answer = parsed.get("answer", "").strip()
+        except (json.JSONDecodeError, AttributeError):
+            # fallback: "question: ...\nanswer: ..." 또는 "\n답변:" 형식
+            if "\nanswer:" in qa:
+                q, a = qa.split("\nanswer:", 1)
+                question = q.replace("question:", "").strip()
+                answer = a.strip()
+            elif "\n답변:" in qa:
+                q, a = qa.split("\n답변:", 1)
+                question = q.replace("질문:", "").strip()
+                answer = a.strip()
+            else:
+                question = qa.strip()
         rows.append({"question": question, "answer": answer, "page": page})
     return rows, input_dir
 
 
-def load_qa_from_plain_json(path: str) -> tuple[list[dict], str]:
+def load_qa_from_base_json(path: str) -> tuple[list[dict], str]:
     """
-    Plain 결과 JSON에서 QA 리스트 추출. qa 필드 형식: '{"question": "...", "answer": "..."}'
+    Base 결과 JSON에서 QA 리스트 추출. qa 필드 형식: '{"question": "...", "answer": "..."}'
     Returns:
         (rows, input_dir). 각 row는 question, answer, page 포함.
     """
@@ -141,16 +153,16 @@ def run_ragas_evaluate(dataset, metrics):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Ragas로 LoRA vs Plain QA 결과 비교")
+    parser = argparse.ArgumentParser(description="Ragas로 LoRA vs Base QA 결과 비교")
     parser.add_argument(
         "--lora",
         default="20260112_industry_6792000_qa_lora_results.json",
         help="LoRA 결과 JSON 경로",
     )
     parser.add_argument(
-        "--plain",
+        "--base",
         default="20260112_industry_6792000_qa_vanila_results.json",
-        help="Plain 결과 JSON 경로",
+        help="Base 결과 JSON 경로",
     )
     parser.add_argument(
         "--output",
@@ -172,22 +184,19 @@ def main():
     )
     args = parser.parse_args()
 
-    base_dir = Path(__file__).resolve().parent
+    base_dir = Path.cwd()  # 프로젝트 루트에서 실행한다고 가정 (python scripts/test/...)
     lora_path = Path(args.lora)
-    plain_path = Path(args.plain)
+    base_path = Path(args.base)
 
     if not lora_path.exists():
         raise FileNotFoundError(f"LoRA 결과 파일 없음: {lora_path}")
-    if not plain_path.exists():
-        raise FileNotFoundError(f"Plain 결과 파일 없음: {plain_path}")
+    if not base_path.exists():
+        raise FileNotFoundError(f"Base 결과 파일 없음: {base_path}")
 
-    # QA 추출 (각 row에 question, answer, page 포함)
     lora_rows, lora_input_dir = load_qa_from_lora_json(str(lora_path))
-    plain_rows, plain_input_dir = load_qa_from_plain_json(str(plain_path))
+    base_rows, base_input_dir = load_qa_from_base_json(str(base_path))
 
-    # 페이지 context: input_dir 아래 0001/result.mmd, 0002/result.mmd, ... (해당 페이지의 OCR 텍스트)
-    input_dir = lora_input_dir if lora_input_dir == plain_input_dir else ""
-
+    input_dir = lora_input_dir if lora_input_dir == base_input_dir else ""
     # faithfulness, context_relevance는 context(OCR 텍스트)가 필요하므로 해당 메트릭이 선택된 경우에만 로드
     needs_context = any(
         m in args.metrics for m in ("faithfulness", "context_relevance")
@@ -202,9 +211,9 @@ def main():
         ]
 
     contexts_lora = make_contexts(lora_rows)
-    contexts_plain = make_contexts(plain_rows)
+    contexts_base = make_contexts(base_rows)
     if needs_context and input_dir:
-        loaded = sum(1 for ctx in contexts_lora + contexts_plain if ctx and ctx[0])
+        loaded = sum(1 for ctx in contexts_lora + contexts_base if ctx and ctx[0])
         print(f"페이지 context 로드: {input_dir} (result.mmd 사용 샘플 수: {loaded})")
 
     # LLM/Embeddings 설정
@@ -268,12 +277,12 @@ def main():
 
     # Dataset 생성 및 평가 (각 페이지의 result.mmd를 context로 사용)
     ds_lora = build_ragas_dataset(lora_rows, contexts_lora)
-    ds_plain = build_ragas_dataset(plain_rows, contexts_plain)
+    ds_base = build_ragas_dataset(base_rows, contexts_base)
 
     print("LoRA 결과 평가 중...")
     result_lora = run_ragas_evaluate(ds_lora, metrics)
-    print("Plain 결과 평가 중...")
-    result_plain = run_ragas_evaluate(ds_plain, metrics)
+    print("Base 결과 평가 중...")
+    result_base = run_ragas_evaluate(ds_base, metrics)
 
     def scores_to_dict(result):
         if isinstance(result, dict):
@@ -293,17 +302,16 @@ def main():
             "num_samples": len(lora_rows),
             "scores": scores_to_dict(result_lora),
         },
-        "plain": {
-            "file": str(plain_path),
-            "num_samples": len(plain_rows),
-            "scores": scores_to_dict(result_plain),
+        "base": {
+            "file": str(base_path),
+            "num_samples": len(base_rows),
+            "scores": scores_to_dict(result_base),
         },
     }
 
-    # 콘솔 출력
     print("\n========== Ragas 비교 결과 ==========")
     print(f"LoRA  (n={summary['lora']['num_samples']}): {summary['lora']['scores']}")
-    print(f"Plain (n={summary['plain']['num_samples']}): {summary['plain']['scores']}")
+    print(f"Base  (n={summary['base']['num_samples']}): {summary['base']['scores']}")
 
     out_path = base_dir / args.output
     with open(out_path, "w", encoding="utf-8") as f:

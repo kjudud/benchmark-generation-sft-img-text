@@ -68,14 +68,21 @@ python scripts/dataset/add_question_types.py
 # OCR 결과 결합 → datasets/SDS-KoPub-with-question-types-and-ocr/ (최종 학습 데이터셋)
 python scripts/dataset/create_dataset_from_ocr.py
 
-# 최종 데이터셋 확인
+# 데이터셋 확인
 python scripts/dataset/check_training_dataset.py
+python scripts/analyze/check_long_samples.py
+
+# ocr 오류난 파일 filter
+python filter_samples.py --indeices 313 344
 ```
 
 ### 3. LoRA 학습
 
 ```bash
+#8B 모델 unsloth 사용 단일 gpu
 python scripts/train/qwen3_vl_8b_training.py
+# 32B 모델 PEFT 표준 방식 멀티 GPU
+python scripts/train/qwen3_vl_32b_training.py
 ```
 
 학습된 어댑터는 `models/qwen3-vl-8b-sft/`에 저장됩니다.
@@ -83,6 +90,8 @@ python scripts/train/qwen3_vl_8b_training.py
 ### 4. 추론
 
 ```bash
+
+### 8b 모델 inferecne
 # LoRA 학습 모델
 python scripts/inference/inference_qwen3vl_lora.py \
   --input-dir test_data/20260112_industry_6792000 \
@@ -93,6 +102,13 @@ python scripts/inference/inference_qwen3vl_lora.py \
 python scripts/inference/inference_qwen3vl_plain.py \
   --input-dir test_data/20260112_industry_6792000 \
   --output-file results/plain_results.json
+
+
+### 32b 모델 inference
+python scripts/inference/inference_qwen3vl32b_lora.py \
+  --input-dir test_data/20260112_industry_6792000 \
+  --model-path models/qwen3-vl-32b-sft \
+  --output-file results/lora_32b_results.json
 ```
 
 ### 5. 모델 export (선택)
@@ -122,6 +138,8 @@ python scripts/test/compare_qa_with_ragas.py \
 
 ```bash
 # 학습/추론 환경
+conda create -n Qwen3-VL-train python=3.12
+conda activate Qwen3-VL-train
 pip install -r requirements.txt
 
 # RAGAS 평가 환경

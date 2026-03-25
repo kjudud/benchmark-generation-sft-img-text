@@ -95,7 +95,7 @@ def main():
     print(f"✅ 변환 완료: 총 {len(converted_dataset)}개 샘플")
 
     model, tokenizer = FastVisionModel.from_pretrained(
-        "unsloth/Qwen3-VL-8B-Instruct-unsloth-bnb-4bit",
+        "unsloth/Qwen3-VL-32B-Instruct-unsloth-bnb-4bit",
         load_in_4bit=True,  # Use 4bit to reduce memory use. False for 16bit LoRA.
         use_gradient_checkpointing="unsloth",  # True or "unsloth" for long context
     )
@@ -133,7 +133,7 @@ def main():
             # 학습 스케줄 설정
             num_train_epochs=3,  # 전체 데이터셋을 3번 반복
             warmup_ratio=0.1,  # 전체 스텝의 10%를 warmup으로 사용
-            learning_rate=2e-4,  # Vision-Language 모델에 적합한 학습률
+            learning_rate=2e-5,  # Vision-Language 모델에 적합한 학습률
             lr_scheduler_type="cosine",  # cosine 스케줄러 사용
             # 최적화 설정
             optim="adamw_8bit",
