@@ -11,13 +11,64 @@ Context: 각 페이지는 이미지(들)와 대응하는 OCR 텍스트(result.mm
   pip install -r requirements-ragas.txt
   export OPENAI_API_KEY="your-key"   # Ragas 메트릭용 LLM (기본: OpenAI)
 
+사용 예시:
+python scripts/test/compare_qa_with_ragas.py \
+  --lora results/8b_lora_text_qa_results_converted.json \
+  --base results/8b_base_text_qa_results_converted.json \
+  --metrics answer_relevancy faithfulness context_relevance \
+  --llm-log ragas_llm_response.json
 참고: https://docs.ragas.io/en/latest/getstarted/
       https://docs.ragas.io/en/latest/howtos/applications/compare_llms.html
 """
 
 import argparse
 import json
+import threading
 from pathlib import Path
+from langchain_core.callbacks.base import BaseCallbackHandler
+
+
+class LLMResponseLogger(BaseCallbackHandler):
+    """LangChain LLM의 프롬프트와 응답을 파일로 저장하는 콜백 핸들러."""
+
+    def __init__(self, log_path: str):
+        super().__init__()
+        self.log_path = Path(log_path)
+        self.logs: list[dict] = []
+        self._lock = threading.Lock()
+        self._prompts_by_run: dict = {}  # run_id → prompts 매핑
+
+    def on_llm_start(self, serialized: dict, prompts: list[str], run_id, **kwargs):
+        # run_id로 각 호출을 고유하게 식별 (asyncio 환경에서도 안전)
+        with self._lock:
+            self._prompts_by_run[str(run_id)] = prompts
+
+    def on_llm_end(self, response, run_id, **kwargs):
+        with self._lock:
+            prompts = self._prompts_by_run.pop(str(run_id), [])
+        entries = []
+        for i, prompt in enumerate(prompts):
+            gens = response.generations[i] if i < len(response.generations) else []
+            for gen in gens:
+                entries.append(
+                    {
+                        "prompt": prompt,
+                        "response": gen.text if hasattr(gen, "text") else str(gen),
+                    }
+                )
+        with self._lock:
+            self.logs.extend(entries)
+
+    def on_llm_error(self, error, run_id=None, **kwargs):
+        with self._lock:
+            self._prompts_by_run.pop(str(run_id), None)
+            self.logs.append({"error": str(error)})
+
+    def save(self):
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.log_path, "w", encoding="utf-8") as f:
+            json.dump(self.logs, f, ensure_ascii=False, indent=2)
+        print(f"LLM 응답 로그 저장: {self.log_path} ({len(self.logs)}건)")
 
 
 def load_page_context(
@@ -27,6 +78,10 @@ def load_page_context(
     해당 페이지의 context 텍스트를 로드합니다.
     페이지는 이미지 폴더(0001, 0002, ...)에 대응하며, 그 안의 result.mmd가 OCR 텍스트입니다.
     Ragas는 텍스트 context만 사용하므로 이 텍스트를 faithfulness 등 메트릭에 활용합니다.
+
+    다음 두 가지 디렉터리 구조를 모두 지원합니다.
+      1. {input_dir}/{page_dir}/result.mmd
+      2. {input_dir}/{pdf_dir}/{page_dir}/result.mmd  (하위 문서 디렉터리 존재 시)
 
     Args:
         base_dir: 프로젝트 루트 (스크립트 기준)
@@ -38,9 +93,27 @@ def load_page_context(
         해당 페이지의 result.mmd 내용. 없거나 실패 시 빈 문자열.
     """
     page_dir = str(page).zfill(4)  # 1 -> "0001"
-    mmd_path = base_dir / input_dir / page_dir / "result.mmd"
-    if not mmd_path.exists():
-        return ""
+    root = Path(input_dir) if Path(input_dir).is_absolute() else base_dir / input_dir
+
+    # 구조 1: {input_dir}/{page_dir}/result.mmd
+    mmd_path = root / page_dir / "result.mmd"
+    if mmd_path.exists():
+        return _read_mmd(mmd_path, max_chars)
+
+    # 구조 2: {input_dir}/{pdf_dir}/{page_dir}/result.mmd
+    # input_dir 바로 아래 서브디렉터리를 순회하여 page_dir 탐색
+    if root.is_dir():
+        for sub in sorted(root.iterdir()):
+            if sub.is_dir():
+                mmd_path = sub / page_dir / "result.mmd"
+                if mmd_path.exists():
+                    return _read_mmd(mmd_path, max_chars)
+
+    return ""
+
+
+def _read_mmd(mmd_path: Path, max_chars: int | None) -> str:
+    """result.mmd 파일을 읽어 반환합니다. max_chars 초과 시 잘라냅니다."""
     try:
         text = mmd_path.read_text(encoding="utf-8").strip()
         if max_chars and len(text) > max_chars:
@@ -140,14 +213,15 @@ def build_ragas_dataset(rows: list[dict], contexts_list: list[list[str]] | None 
     return ds
 
 
-def run_ragas_evaluate(dataset, metrics):
+def run_ragas_evaluate(dataset, metrics, max_workers: int = 4):
     """Ragas evaluate 실행. 메트릭은 이미 llm/embeddings가 초기화된 객체여야 함."""
     from ragas import evaluate
     from ragas.run_config import RunConfig
 
-    # timeout 기본값이 짧아 context_relevance(LangchainLLMWrapper) 등에서 TimeoutError 발생
-    # → timeout을 300초로 늘려 안정적으로 처리
-    run_config = RunConfig(timeout=300, max_retries=3)
+    # timeout: 단일 API 호출 제한 시간 (초)
+    # max_retries: 실패 시 재시도 횟수
+    # max_workers: 동시 API 호출 수 - 낮출수록 Rate Limit/TimeoutError 감소
+    run_config = RunConfig(timeout=300, max_retries=5, max_workers=max_workers)
     result = evaluate(dataset, metrics=metrics, run_config=run_config)
     return result
 
@@ -181,6 +255,17 @@ def main():
         type=int,
         default=2000,
         help="페이지당 context 최대 문자 수 (faithfulness max_tokens 오류 방지). 0이면 제한 없음. 기본: 2000",
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=2,
+        help="Ragas 동시 API 호출 수. 낮을수록 Rate Limit/TimeoutError 감소 (기본: 2, TimeoutError 시 1~2로 줄여보세요)",
+    )
+    parser.add_argument(
+        "--llm-log",
+        default="",
+        help="LLM 프롬프트/응답을 저장할 JSON 파일 경로 (미지정 시 저장 안 함)",
     )
     args = parser.parse_args()
 
@@ -229,8 +314,15 @@ def main():
         client = OpenAI()
         # max_tokens 기본값(1024)은 faithfulness 등 장문 응답 분석 시 부족 → 4096으로 증가
         llm = llm_factory("gpt-4o-mini", client=client, max_tokens=4096)
+
+        # LLM 응답 로깅 콜백 설정 (--llm-log 지정 시)
+        llm_logger = LLMResponseLogger(args.llm_log) if args.llm_log else None
+        callbacks = [llm_logger] if llm_logger else []
+
         # ContextRelevance는 agenerate_text()를 사용 → LangChain LLM 필요
-        llm_langchain = LangchainLLMWrapper(ChatOpenAI(model="gpt-4o-mini"))
+        llm_langchain = LangchainLLMWrapper(
+            ChatOpenAI(model="gpt-4o-mini", callbacks=callbacks)
+        )
         embeddings = LangchainOpenAIEmbeddings(model="text-embedding-3-small")
     except Exception as e:
         print(f"Error: Ragas LLM/embeddings 설정 실패 ({e}).")
@@ -280,9 +372,12 @@ def main():
     ds_base = build_ragas_dataset(base_rows, contexts_base)
 
     print("LoRA 결과 평가 중...")
-    result_lora = run_ragas_evaluate(ds_lora, metrics)
+    result_lora = run_ragas_evaluate(ds_lora, metrics, max_workers=args.max_workers)
     print("Base 결과 평가 중...")
-    result_base = run_ragas_evaluate(ds_base, metrics)
+    result_base = run_ragas_evaluate(ds_base, metrics, max_workers=args.max_workers)
+
+    if llm_logger:
+        llm_logger.save()
 
     def scores_to_dict(result):
         if isinstance(result, dict):
