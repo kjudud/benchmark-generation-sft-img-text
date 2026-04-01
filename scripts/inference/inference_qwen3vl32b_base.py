@@ -37,17 +37,32 @@ def load_ocr_data_from_pages(
     if not os.path.isdir(ocr_output_dir):
         raise NotADirectoryError(f"디렉토리를 찾을 수 없습니다: {ocr_output_dir}")
 
-    # 숫자 이름의 하위 디렉토리만 페이지 디렉토리로 인식
-    page_dirs = []
-    for item in os.listdir(ocr_output_dir):
-        item_path = os.path.join(ocr_output_dir, item)
-        if os.path.isdir(item_path):
-            try:
-                page_dirs.append((int(item), item_path, item))
-            except ValueError:
-                continue
+    # 직속 하위 디렉토리 목록 수집
+    subdirs = [
+        (item, os.path.join(ocr_output_dir, item))
+        for item in os.listdir(ocr_output_dir)
+        if os.path.isdir(os.path.join(ocr_output_dir, item))
+    ]
 
-    page_dirs.sort(key=lambda x: x[0])
+    # 직속 하위 디렉토리가 모두 숫자이면 flat 구조 (input_dir/0001/)
+    # 비숫자 디렉토리가 있으면 nested 구조 (input_dir/문서명/0001/)
+    numeric_subdirs = [(name, path) for name, path in subdirs if name.isdigit()]
+    non_numeric_subdirs = [(name, path) for name, path in subdirs if not name.isdigit()]
+
+    page_dirs = []  # (sort_key, page_dir_path, display_name)
+    if numeric_subdirs and not non_numeric_subdirs:
+        # flat 구조: input_dir/0001/, input_dir/0002/, ...
+        for name, path in numeric_subdirs:
+            page_dirs.append((int(name), path, name))
+        page_dirs.sort(key=lambda x: x[0])
+    else:
+        # nested 구조: input_dir/문서명/0001/, input_dir/문서명/0002/, ...
+        for doc_name, doc_path in sorted(non_numeric_subdirs):
+            for page_item in sorted(os.listdir(doc_path)):
+                page_path = os.path.join(doc_path, page_item)
+                if os.path.isdir(page_path) and page_item.isdigit():
+                    page_dirs.append((int(page_item), page_path, f"{doc_name}/{page_item}"))
+        page_dirs.sort(key=lambda x: (x[2].rsplit("/", 1)[0], x[0]))
 
     if not page_dirs:
         raise ValueError(f"페이지 디렉토리를 찾을 수 없습니다: {ocr_output_dir}")
@@ -117,7 +132,7 @@ def create_qa_prompt(
 
 생성된 각 질문은 다음 특성을 가져야 합니다:
 - {question_type}
-- {type_value}"""
+- {type_value} 정보를 활용하여 질문을 생성하세요."""
     return prompt
 
 
@@ -214,9 +229,9 @@ def main():
     args = parser.parse_args()
 
     # 기본 도메인/질문 유형 (학습 시와 동일)
-    domain = "산업"
+    domain = "보건,의료"
     question_type = "Factual Question"
-    type_value = "cross"
+    type_value = "text"
 
     model, processor = load_model(args.model_path)
     pages_data = load_ocr_data_from_pages(args.input_dir)

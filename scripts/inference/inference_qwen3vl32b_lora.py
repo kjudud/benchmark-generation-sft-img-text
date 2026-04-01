@@ -4,9 +4,10 @@ Qwen3-VL LoRA 파인튜닝 모델 추론 스크립트
 페이지별 OCR 디렉토리에서 텍스트와 이미지를 로드해 QA를 생성합니다.
 
 사용법:
-    python inference_qwen3vl_lora.py --input-dir test_data/20260112_industry_6792000
+    python inference_qwen3vl32b_lora.py --input-dir test_data
 
-디렉토리 구조:
+디렉토리 구조 (두 가지 모두 지원):
+    flat 구조:
     <input-dir>/
         ├── 0001/
         │   ├── result.mmd
@@ -14,6 +15,16 @@ Qwen3-VL LoRA 파인튜닝 모델 추론 스크립트
         └── 0002/
             ├── result.mmd
             └── images/
+
+    nested 구조:
+    <input-dir>/
+        └── 문서명/
+            ├── 0001/
+            │   ├── result.mmd
+            │   └── images/
+            └── 0002/
+                ├── result.mmd
+                └── images/
 """
 
 from transformers import AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConfig
@@ -23,7 +34,10 @@ import torch
 import os
 import json
 import argparse
+import time
 from typing import List
+
+IMAGE_MAX_SIZE = 1024  # 이미지 최대 가로/세로 크기 (px), 초과 시 비율 유지하며 축소
 
 
 def load_ocr_data_from_pages(
@@ -38,17 +52,32 @@ def load_ocr_data_from_pages(
     if not os.path.isdir(ocr_output_dir):
         raise NotADirectoryError(f"디렉토리를 찾을 수 없습니다: {ocr_output_dir}")
 
-    # 숫자 이름의 하위 디렉토리만 페이지 디렉토리로 인식
-    page_dirs = []
-    for item in os.listdir(ocr_output_dir):
-        item_path = os.path.join(ocr_output_dir, item)
-        if os.path.isdir(item_path):
-            try:
-                page_dirs.append((int(item), item_path, item))
-            except ValueError:
-                continue
+    # 직속 하위 디렉토리 목록 수집
+    subdirs = [
+        (item, os.path.join(ocr_output_dir, item))
+        for item in os.listdir(ocr_output_dir)
+        if os.path.isdir(os.path.join(ocr_output_dir, item))
+    ]
 
-    page_dirs.sort(key=lambda x: x[0])
+    # 직속 하위 디렉토리가 모두 숫자이면 flat 구조 (input_dir/0001/)
+    # 비숫자 디렉토리가 있으면 nested 구조 (input_dir/문서명/0001/)
+    numeric_subdirs = [(name, path) for name, path in subdirs if name.isdigit()]
+    non_numeric_subdirs = [(name, path) for name, path in subdirs if not name.isdigit()]
+
+    page_dirs = []  # (sort_key, page_dir_path, display_name)
+    if numeric_subdirs and not non_numeric_subdirs:
+        # flat 구조: input_dir/0001/, input_dir/0002/, ...
+        for name, path in numeric_subdirs:
+            page_dirs.append((int(name), path, name))
+        page_dirs.sort(key=lambda x: x[0])
+    else:
+        # nested 구조: input_dir/문서명/0001/, input_dir/문서명/0002/, ...
+        for doc_name, doc_path in sorted(non_numeric_subdirs):
+            for page_item in sorted(os.listdir(doc_path)):
+                page_path = os.path.join(doc_path, page_item)
+                if os.path.isdir(page_path) and page_item.isdigit():
+                    page_dirs.append((int(page_item), page_path, f"{doc_name}/{page_item}"))
+        page_dirs.sort(key=lambda x: (x[2].rsplit("/", 1)[0], x[0]))
 
     if not page_dirs:
         raise ValueError(f"페이지 디렉토리를 찾을 수 없습니다: {ocr_output_dir}")
@@ -78,7 +107,15 @@ def load_ocr_data_from_pages(
             ])
             for img_path in image_files:
                 try:
-                    page_images.append(PILImage.open(img_path).convert("RGB"))
+                    img = PILImage.open(img_path).convert("RGB")
+                    if max(img.width, img.height) > IMAGE_MAX_SIZE:
+                        scale = IMAGE_MAX_SIZE / max(img.width, img.height)
+                        orig_w, orig_h = img.width, img.height
+                        new_w = int(orig_w * scale)
+                        new_h = int(orig_h * scale)
+                        img = img.resize((new_w, new_h), PILImage.LANCZOS)
+                        print(f"  [{page_name}] 이미지 리사이즈: ({orig_w}x{orig_h}) → ({new_w}x{new_h})")
+                    page_images.append(img)
                 except Exception as e:
                     print(f"[{page_name}] 이미지 로드 실패: {img_path} - {e}")
 
@@ -118,7 +155,7 @@ def create_qa_prompt(
 
 생성된 각 질문은 다음 특성을 가져야 합니다:
 - {question_type}
-- {type_value}"""
+- {type_value} 정보를 활용하여 질문을 생성하세요."""
     return prompt
 
 
@@ -221,9 +258,9 @@ def main():
     args = parser.parse_args()
 
     # 기본 도메인/질문 유형 (학습 시와 동일)
-    domain = "산업"
+    domain = "보건,의료"
     question_type = "Factual Question"
-    type_value = "cross"
+    type_value = "text"
 
     model, processor = load_model(args.model_path)
     pages_data = load_ocr_data_from_pages(args.input_dir)
@@ -232,12 +269,12 @@ def main():
         raise ValueError(f"OCR 데이터를 찾을 수 없습니다: {args.input_dir}")
 
     all_generated_qa = []
+    start_time = time.time()
     for page_idx, (page_text, page_images) in enumerate(pages_data, 1):
         print(f"페이지 {page_idx}/{len(pages_data)} 처리 중...")
 
         if not page_text and not page_images:
-            continue
-
+            continue     
         qa = generate_qa(
             model, processor, page_text, page_images,
             domain=domain, question_type=question_type, type_value=type_value,
@@ -251,6 +288,8 @@ def main():
             "image_count": len(page_images),
             "qa": qa,
         })
+    qa_elapsed = time.time() - start_time
+    print(f"총 처리 시간: {qa_elapsed:.1f}초 ({qa_elapsed/60:.1f}분)")
 
     # 출력 파일 경로 결정
     if args.output_file:
