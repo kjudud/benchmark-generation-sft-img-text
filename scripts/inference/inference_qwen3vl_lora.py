@@ -6,7 +6,8 @@ Qwen3-VL LoRA 파인튜닝 모델 추론 스크립트
 사용법:
     python inference_qwen3vl_lora.py --input-dir test_data/20260112_industry_6792000
 
-디렉토리 구조:
+디렉토리 구조 (두 가지 모두 지원):
+    flat 구조:
     <input-dir>/
         ├── 0001/
         │   ├── result.mmd
@@ -14,6 +15,21 @@ Qwen3-VL LoRA 파인튜닝 모델 추론 스크립트
         └── 0002/
             ├── result.mmd
             └── images/
+
+    nested 구조:
+    <input-dir>/
+        └── 문서명/
+            ├── 0001/
+            │   ├── result.mmd
+            │   └── images/
+            └── 0002/
+                ├── result.mmd
+                └── images/
+
+결과 JSON pages[] 항목:
+    - context: 해당 페이지 OCR 텍스트(result.mmd)
+    - context_path: input_dir 기준 상대 경로 (예: 0001/result.mmd)
+    - qa: 모델 생성 문자열
 """
 
 from unsloth import FastVisionModel
@@ -24,30 +40,45 @@ import json
 import argparse
 from typing import List
 
+IMAGE_MAX_SIZE = 1024  # 이미지 최대 가로/세로 크기 (px), 초과 시 비율 유지하며 축소
+
 
 def load_ocr_data_from_pages(
     ocr_output_dir: str,
-) -> List[tuple[str, List[PILImage.Image]]]:
+) -> List[tuple[str, List[PILImage.Image], str]]:
     """
     페이지별 OCR 디렉토리에서 텍스트(result.mmd)와 이미지를 로드합니다.
 
     Returns:
-        [(page_text, [page_images]), ...]  페이지 번호 순 정렬
+        [(page_text, [page_images], context_path), ...]
+        context_path: input_dir 기준 상대 경로 (예: 0001/result.mmd 또는 문서명/0001/result.mmd)
     """
     if not os.path.isdir(ocr_output_dir):
         raise NotADirectoryError(f"디렉토리를 찾을 수 없습니다: {ocr_output_dir}")
 
-    # 숫자 이름의 하위 디렉토리만 페이지 디렉토리로 인식
-    page_dirs = []
-    for item in os.listdir(ocr_output_dir):
-        item_path = os.path.join(ocr_output_dir, item)
-        if os.path.isdir(item_path):
-            try:
-                page_dirs.append((int(item), item_path, item))
-            except ValueError:
-                continue
+    ocr_output_dir = os.path.abspath(ocr_output_dir)
 
-    page_dirs.sort(key=lambda x: x[0])
+    subdirs = [
+        (item, os.path.join(ocr_output_dir, item))
+        for item in os.listdir(ocr_output_dir)
+        if os.path.isdir(os.path.join(ocr_output_dir, item))
+    ]
+
+    numeric_subdirs = [(name, path) for name, path in subdirs if name.isdigit()]
+    non_numeric_subdirs = [(name, path) for name, path in subdirs if not name.isdigit()]
+
+    page_dirs = []  # (sort_key, page_dir_path, display_name)
+    if numeric_subdirs and not non_numeric_subdirs:
+        for name, path in numeric_subdirs:
+            page_dirs.append((int(name), path, name))
+        page_dirs.sort(key=lambda x: x[0])
+    else:
+        for doc_name, doc_path in sorted(non_numeric_subdirs):
+            for page_item in sorted(os.listdir(doc_path)):
+                page_path = os.path.join(doc_path, page_item)
+                if os.path.isdir(page_path) and page_item.isdigit():
+                    page_dirs.append((int(page_item), page_path, f"{doc_name}/{page_item}"))
+        page_dirs.sort(key=lambda x: (x[2].rsplit("/", 1)[0], x[0]))
 
     if not page_dirs:
         raise ValueError(f"페이지 디렉토리를 찾을 수 없습니다: {ocr_output_dir}")
@@ -57,7 +88,6 @@ def load_ocr_data_from_pages(
         page_text = ""
         page_images = []
 
-        # OCR 텍스트 로드
         text_file = os.path.join(page_dir, "result.mmd")
         if os.path.exists(text_file):
             try:
@@ -66,7 +96,6 @@ def load_ocr_data_from_pages(
             except Exception as e:
                 print(f"[{page_name}] 텍스트 로드 실패: {e}")
 
-        # 이미지 로드
         images_dir = os.path.join(page_dir, "images")
         if os.path.exists(images_dir):
             image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
@@ -77,12 +106,26 @@ def load_ocr_data_from_pages(
             ])
             for img_path in image_files:
                 try:
-                    page_images.append(PILImage.open(img_path).convert("RGB"))
+                    img = PILImage.open(img_path).convert("RGB")
+                    if max(img.width, img.height) > IMAGE_MAX_SIZE:
+                        scale = IMAGE_MAX_SIZE / max(img.width, img.height)
+                        orig_w, orig_h = img.width, img.height
+                        new_w = int(orig_w * scale)
+                        new_h = int(orig_h * scale)
+                        img = img.resize((new_w, new_h), PILImage.LANCZOS)
+                        print(f"  [{page_name}] 이미지 리사이즈: ({orig_w}x{orig_h}) → ({new_w}x{new_h})")
+                    page_images.append(img)
                 except Exception as e:
                     print(f"[{page_name}] 이미지 로드 실패: {img_path} - {e}")
 
         if page_text or page_images:
-            pages_data.append((page_text, page_images))
+            rel = os.path.relpath(page_dir, ocr_output_dir).replace("\\", "/")
+            mmd_file = os.path.join(page_dir, "result.mmd")
+            if os.path.exists(mmd_file):
+                context_path = f"{rel}/result.mmd"
+            else:
+                context_path = rel
+            pages_data.append((page_text, page_images, context_path))
         else:
             print(f"[{page_name}] 텍스트와 이미지가 없어 스킵합니다.")
 
@@ -257,8 +300,10 @@ def main():
         raise ValueError(f"OCR 데이터를 찾을 수 없습니다: {args.input_dir}")
 
     all_generated_qa = []
-    for page_idx, (page_text, page_images) in enumerate(pages_data, 1):
-        print(f"페이지 {page_idx}/{len(pages_data)} 처리 중...")
+    for page_idx, (page_text, page_images, context_path) in enumerate(
+        pages_data, 1
+    ):
+        print(f"페이지 {page_idx}/{len(pages_data)} ({context_path}) 처리 중...")
 
         if not page_text and not page_images:
             continue
@@ -271,7 +316,8 @@ def main():
             top_p=args.top_p,
         )
         all_generated_qa.append({
-            "page": page_idx,
+            "context_path": context_path,
+            "context": page_text,
             "text_length": len(page_text),
             "image_count": len(page_images),
             "qa": qa,

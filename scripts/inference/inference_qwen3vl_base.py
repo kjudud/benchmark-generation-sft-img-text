@@ -6,22 +6,30 @@ Qwen3-VL 원본 모델 추론 예제 (LoRA 미사용)
 학습 시와 유사한 prompt 형식을 사용합니다.
 
 사용법:
-    python inference_qwen3vl_vanila.py --input-dir <OCR_출력_상위_디렉토리>
+    python inference_qwen3vl_base.py --input-dir <OCR_출력_상위_디렉토리>
 
-예시:
-    python inference_qwen3vl_vanila.py --input-dir test_data/20260112_industry_6792000
+예시:   
+    python inference_qwen3vl_base.py --input-dir test_data/20260112_industry_6792000
 
-디렉토리 구조:
+디렉토리 구조 (두 가지 모두 지원):
+    flat 구조:
     <input-dir>/
-        ├── 0001/  (또는 0, 1, 2, ...)
+        ├── 0001/
         │   ├── result.mmd
         │   └── images/
-        │       ├── 0001.jpg
-        │       └── ...
-        ├── 0002/
-        │   ├── result.mmd
-        │   └── images/
-        └── ...
+        └── 0002/
+            ├── result.mmd
+            └── images/
+
+    nested 구조:
+    <input-dir>/
+        └── 문서명/
+            ├── 0001/
+            │   ├── result.mmd
+            │   └── images/
+            └── 0002/
+                ├── result.mmd
+                └── images/
 """
 
 from unsloth import FastVisionModel
@@ -32,53 +40,56 @@ import json
 import argparse
 from typing import List
 
+IMAGE_MAX_SIZE = 1024  # 이미지 최대 가로/세로 크기 (px), 초과 시 비율 유지하며 축소
+
 
 def load_ocr_data_from_pages(
     ocr_output_dir: str,
-) -> List[tuple[str, List[PILImage.Image]]]:
+) -> List[tuple[str, List[PILImage.Image], str]]:
     """
-    페이지별 OCR 출력 디렉토리에서 각 페이지의 텍스트와 이미지를 별도로 로드
-
-    Args:
-        ocr_output_dir: OCR 출력 상위 디렉토리 경로 (예: test_data/20260112_industry_6792000)
-                       각 페이지는 숫자로 된 하위 디렉토리 (예: 0, 1, 2, ... 또는 0001, 0002, ...)
+    페이지별 OCR 디렉토리에서 텍스트(result.mmd)와 이미지를 로드합니다.
 
     Returns:
-        pages_data: 각 페이지의 (ocr_text, ocr_images) 튜플 리스트
-                   [(page1_text, [page1_img1, page1_img2, ...]), (page2_text, [page2_img1, ...]), ...]
+        [(page_text, [page_images], context_path), ...]
+        context_path: input_dir 기준 상대 경로 (예: 0001/result.mmd 또는 문서명/0001/result.mmd)
     """
-    pages_data = []
-
     if not os.path.isdir(ocr_output_dir):
         raise NotADirectoryError(f"디렉토리를 찾을 수 없습니다: {ocr_output_dir}")
 
-    # 페이지별 디렉토리 찾기 (숫자로 된 디렉토리)
-    page_dirs = []
-    for item in os.listdir(ocr_output_dir):
-        item_path = os.path.join(ocr_output_dir, item)
-        if os.path.isdir(item_path):
-            # 숫자로 된 디렉토리인지 확인 (0001, 0002 형식도 처리)
-            try:
-                page_num = int(item)
-                page_dirs.append((page_num, item_path, item))
-            except ValueError:
-                # 숫자가 아닌 디렉토리는 무시
-                continue
+    ocr_output_dir = os.path.abspath(ocr_output_dir)
 
-    # 페이지 번호 순으로 정렬
-    page_dirs.sort(key=lambda x: x[0])
+    subdirs = [
+        (item, os.path.join(ocr_output_dir, item))
+        for item in os.listdir(ocr_output_dir)
+        if os.path.isdir(os.path.join(ocr_output_dir, item))
+    ]
+
+    numeric_subdirs = [(name, path) for name, path in subdirs if name.isdigit()]
+    non_numeric_subdirs = [(name, path) for name, path in subdirs if not name.isdigit()]
+
+    page_dirs = []  # (sort_key, page_dir_path, display_name)
+    if numeric_subdirs and not non_numeric_subdirs:
+        for name, path in numeric_subdirs:
+            page_dirs.append((int(name), path, name))
+        page_dirs.sort(key=lambda x: x[0])
+    else:
+        for doc_name, doc_path in sorted(non_numeric_subdirs):
+            for page_item in sorted(os.listdir(doc_path)):
+                page_path = os.path.join(doc_path, page_item)
+                if os.path.isdir(page_path) and page_item.isdigit():
+                    page_dirs.append((int(page_item), page_path, f"{doc_name}/{page_item}"))
+        page_dirs.sort(key=lambda x: (x[2].rsplit("/", 1)[0], x[0]))
 
     if not page_dirs:
         raise ValueError(f"페이지 디렉토리를 찾을 수 없습니다: {ocr_output_dir}")
 
     print(f"   📄 페이지 디렉토리 발견: {len(page_dirs)}개")
 
-    # 각 페이지 디렉토리에서 텍스트와 이미지를 별도로 로드
+    pages_data = []
     for page_num, page_dir, page_name in page_dirs:
         page_text = ""
         page_images = []
 
-        # 텍스트 파일 로드 (result.mmd)
         text_file = os.path.join(page_dir, "result.mmd")
         if os.path.exists(text_file):
             try:
@@ -89,20 +100,27 @@ def load_ocr_data_from_pages(
             except Exception as e:
                 print(f"      ⚠️  [{page_name}] 텍스트 로드 실패: {e}")
 
-        # 이미지 디렉토리에서 이미지 로드
         images_dir = os.path.join(page_dir, "images")
         if os.path.exists(images_dir):
             image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
-            image_files = [
+            image_files = sorted([
                 os.path.join(images_dir, f)
                 for f in os.listdir(images_dir)
                 if os.path.splitext(f.lower())[1] in image_extensions
-            ]
-            image_files.sort()  # 정렬하여 일관된 순서 보장
+            ])
 
             for img_path in image_files:
                 try:
                     img = PILImage.open(img_path).convert("RGB")
+                    if max(img.width, img.height) > IMAGE_MAX_SIZE:
+                        scale = IMAGE_MAX_SIZE / max(img.width, img.height)
+                        orig_w, orig_h = img.width, img.height
+                        new_w = int(orig_w * scale)
+                        new_h = int(orig_h * scale)
+                        img = img.resize((new_w, new_h), PILImage.LANCZOS)
+                        print(
+                            f"      [{page_name}] 이미지 리사이즈: ({orig_w}x{orig_h}) → ({new_w}x{new_h})"
+                        )
                     page_images.append(img)
                 except Exception as e:
                     print(f"      ⚠️  [{page_name}] 이미지 로드 실패: {img_path} - {e}")
@@ -110,9 +128,14 @@ def load_ocr_data_from_pages(
             if image_files:
                 print(f"      [{page_name}] 이미지 로드: {len(image_files)}개")
 
-        # 페이지별로 데이터 저장 (텍스트가 없어도 이미지만 있어도 저장)
         if page_text or page_images:
-            pages_data.append((page_text, page_images))
+            rel = os.path.relpath(page_dir, ocr_output_dir).replace("\\", "/")
+            mmd_file = os.path.join(page_dir, "result.mmd")
+            if os.path.exists(mmd_file):
+                context_path = f"{rel}/result.mmd"
+            else:
+                context_path = rel
+            pages_data.append((page_text, page_images, context_path))
         else:
             print(
                 f"      ⚠️  [{page_name}] 텍스트와 이미지가 모두 없습니다. 스킵합니다."
@@ -293,7 +316,7 @@ def main():
         "--output-file",
         type=str,
         default=None,
-        help="QA 결과를 저장할 JSON 파일 경로 (기본값: <input-dir>_qa_vanila_results.json)",
+        help="QA 결과를 저장할 JSON 파일 경로 (기본값: <input-dir>_qa_base_results.json)",
     )
 
     args = parser.parse_args()
@@ -326,8 +349,10 @@ def main():
     all_generated_qa = []
 
     # 각 페이지별로 QA 생성
-    for page_idx, (page_text, page_images) in enumerate(pages_data, 1):
-        print(f"\n📄 페이지 {page_idx}/{len(pages_data)} 처리 중...")
+    for page_idx, (page_text, page_images, context_path) in enumerate(
+        pages_data, 1
+    ):
+        print(f"\n📄 페이지 {page_idx}/{len(pages_data)} ({context_path}) 처리 중...")
         print(f"   - 텍스트 길이: {len(page_text)} 문자")
         print(f"   - 이미지 개수: {len(page_images)}개")
 
@@ -350,7 +375,8 @@ def main():
 
         all_generated_qa.append(
             {
-                "page": page_idx,
+                "context_path": context_path,
+                "context": page_text,
                 "text_length": len(page_text),
                 "image_count": len(page_images),
                 "qa": generated_qa,
@@ -365,7 +391,7 @@ def main():
     else:
         # 기본값: input_dir의 마지막 디렉토리 이름을 사용
         input_dir_name = os.path.basename(os.path.normpath(args.input_dir))
-        output_file = f"{input_dir_name}_qa_vanila_results.json"
+        output_file = f"{input_dir_name}_qa_base_results.json"
 
     # 출력 디렉토리 생성
     output_dir = os.path.dirname(output_file) if os.path.dirname(output_file) else "."

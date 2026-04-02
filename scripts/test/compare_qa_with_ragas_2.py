@@ -2,10 +2,13 @@
 """
 Ragas를 사용해 LoRA 결과와 Base 결과 JSON의 QA 성능을 비교하는 스크립트.
 
-Context: inference_qwen3vl32b_lora.py 의 load_ocr_data_from_pages 와 동일한 규칙으로
-  페이지 디렉터리를 나열·필터링합니다 (flat / nested, OCR 또는 이미지가 있는 페이지만 순서 유지).
-  JSON의 page 번호는 추론 시 enumerate(pages_data, 1)과 같은 "포함된 페이지" 기준 1-based 인덱스입니다.
-  Ragas는 텍스트만 쓰므로 각 페이지의 result.mmd 내용을 context로 넣습니다.
+Context 소스 (우선순위):
+  1) JSON pages[].context 가 있으면 추론 결과에 저장된 OCR 텍스트를 그대로 사용
+     (test_health_qa_base_results.json 등 inference_qwen3vl_* 형식).
+  2) 없으면 input_dir 기준으로 디스크에서 result.mmd 를 읽음.
+     inference_qwen3vl32b_lora.py 의 load_ocr_data_from_pages 와 동일한 규칙으로
+     페이지 디렉터리를 나열·필터링합니다 (flat / nested).
+     이때 JSON pages[] 의 행 순서와 포함된 OCR 페이지 순서를 1:1로 맞춥니다 (page 필드 불필요).
 
 사용 전 준비:
   pip install -r requirements-ragas.txt
@@ -140,20 +143,20 @@ def list_included_ocr_page_dirs(ocr_root: Path) -> list[Path]:
 
 def load_page_context_for_index(
     included_page_dirs: list[Path],
-    page: int,
+    one_based_row_index: int,
     max_chars: int | None = None,
 ) -> str:
     """
-    JSON pages[].page (1-based, 포함된 페이지 순서)에 대응하는 result.mmd 텍스트.
+    pages[] 배열에서의 행 순서(1-based)에 대응하는 result.mmd 텍스트.
 
     Args:
         included_page_dirs: list_included_ocr_page_dirs 결과
-        page: 1부터 시작하는 인덱스 (추론 JSON 과 동일)
+        one_based_row_index: JSON pages 의 n번째 행 → n (1부터)
         max_chars: 최대 길이 (None 이면 전체)
     """
-    if page < 1 or page > len(included_page_dirs):
+    if one_based_row_index < 1 or one_based_row_index > len(included_page_dirs):
         return ""
-    mmd_path = included_page_dirs[page - 1] / "result.mmd"
+    mmd_path = included_page_dirs[one_based_row_index - 1] / "result.mmd"
     return _read_mmd(mmd_path, max_chars)
 
 
@@ -171,8 +174,9 @@ def _read_mmd(mmd_path: Path, max_chars: int | None) -> str:
 def load_qa_from_lora_json(path: str) -> tuple[list[dict], str]:
     """
     LoRA 결과 JSON에서 QA 리스트 추출. qa 필드 형식: '{"question": "...", "answer": "..."}'
+    pages[].context 가 있으면 Ragas용 context 로 사용 (추론 JSON 형식).
     Returns:
-        (rows, input_dir). 각 row는 question, answer, page 포함.
+        (rows, input_dir). 각 row는 question, answer, context(선택) 포함.
     """
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -180,14 +184,14 @@ def load_qa_from_lora_json(path: str) -> tuple[list[dict], str]:
     rows = []
     for p in data.get("pages", []):
         qa = p.get("qa") or ""
-        page = p.get("page", 0)
+        ctx = p.get("context")
         question, answer = "", ""
         try:
             # JSON 형식: {"question": "...", "answer": "..."}
             parsed = json.loads(qa)
             question = parsed.get("question", "").strip()
             answer = parsed.get("answer", "").strip()
-        except (json.JSONDecodeError, AttributeError):
+        except (json.JSONDecodeError, AttributeError, TypeError):
             # fallback: "question: ...\nanswer: ..." 또는 "\n답변:" 형식
             if "\nanswer:" in qa:
                 q, a = qa.split("\nanswer:", 1)
@@ -199,22 +203,27 @@ def load_qa_from_lora_json(path: str) -> tuple[list[dict], str]:
                 answer = a.strip()
             else:
                 question = qa.strip()
-        rows.append({"question": question, "answer": answer, "page": page})
+        row = {"question": question, "answer": answer}
+        if isinstance(ctx, str):
+            row["context"] = ctx
+        rows.append(row)
     return rows, input_dir
 
 
 def load_qa_from_base_json(path: str) -> tuple[list[dict], str]:
     """
-    Base 결과 JSON에서 QA 리스트 추출. qa 필드 형식: '{"question": "...", "answer": "..."}'
+    Base 결과 JSON에서 QA 리스트 추출.
+    qa: 문자열이면 JSON 파싱, dict 면 그대로.
+    pages[].context 가 있으면 Ragas용 context 로 사용 (test_health_qa_base_results.json 등).
     Returns:
-        (rows, input_dir). 각 row는 question, answer, page 포함.
+        (rows, input_dir). 각 row는 question, answer, context(선택) 포함.
     """
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     input_dir = data.get("input_dir", "")
     rows = []
     for p in data.get("pages", []):
-        page = p.get("page", 0)
+        ctx = p.get("context")
         qa = p.get("qa")
         if isinstance(qa, str):
             try:
@@ -222,15 +231,15 @@ def load_qa_from_base_json(path: str) -> tuple[list[dict], str]:
             except json.JSONDecodeError:
                 qa = {}
         if isinstance(qa, dict):
-            rows.append(
-                {
-                    "question": qa.get("question", ""),
-                    "answer": qa.get("answer", ""),
-                    "page": page,
-                }
-            )
+            row = {
+                "question": qa.get("question", ""),
+                "answer": qa.get("answer", ""),
+            }
         else:
-            rows.append({"question": "", "answer": "", "page": page})
+            row = {"question": "", "answer": ""}
+        if isinstance(ctx, str):
+            row["context"] = ctx
+        rows.append(row)
     return rows, input_dir
 
 
@@ -304,7 +313,7 @@ def main():
     parser.add_argument(
         "--max-workers",
         type=int,
-        default=2,
+        default=4,
         help="Ragas 동시 API 호출 수. 낮을수록 Rate Limit/TimeoutError 감소 (기본: 2, TimeoutError 시 1~2로 줄여보세요)",
     )
     parser.add_argument(
@@ -337,20 +346,54 @@ def main():
         list_included_ocr_page_dirs(ocr_root) if needs_context and ocr_root else []
     )
 
+    def _truncate_context_text(text: str, max_chars: int | None) -> str:
+        if not text:
+            return ""
+        if max_chars and len(text) > max_chars:
+            return text[:max_chars] + "..."
+        return text
+
     def make_contexts(rows: list[dict]) -> list[list[str]]:
-        if not needs_context or not input_dir:
+        if not needs_context:
             return [[] for _ in rows]
         max_chars = args.context_max_chars if args.context_max_chars > 0 else None
-        return [
-            [load_page_context_for_index(included_page_dirs, r["page"], max_chars)]
-            for r in rows
-        ]
+        out: list[list[str]] = []
+        for idx, r in enumerate(rows):
+            embedded = r.get("context")
+            if isinstance(embedded, str) and embedded.strip():
+                out.append([_truncate_context_text(embedded, max_chars)])
+                continue
+            if input_dir and included_page_dirs:
+                out.append(
+                    [
+                        load_page_context_for_index(
+                            included_page_dirs, idx + 1, max_chars
+                        )
+                    ]
+                )
+            else:
+                out.append([])
+        return out
 
     contexts_lora = make_contexts(lora_rows)
     contexts_base = make_contexts(base_rows)
-    if needs_context and input_dir:
-        loaded = sum(1 for ctx in contexts_lora + contexts_base if ctx and ctx[0])
-        print(f"페이지 context 로드: {input_dir} (result.mmd 사용 샘플 수: {loaded})")
+    if needs_context:
+        n_ctx_lora = sum(
+            1
+            for r in lora_rows
+            if isinstance(r.get("context"), str) and r["context"].strip()
+        )
+        n_ctx_base = sum(
+            1
+            for r in base_rows
+            if isinstance(r.get("context"), str) and r["context"].strip()
+        )
+        print(
+            f"context: JSON pages[].context 사용 "
+            f"(LoRA {n_ctx_lora}건, Base {n_ctx_base}건)"
+        )
+        if input_dir:
+            print(f"  부족 시 OCR 폴백: {input_dir} (result.mmd)")
 
     # LLM/Embeddings 설정
     # - llm (InstructorLLM): AnswerRelevancy, Faithfulness 등 구조화 출력이 필요한 레거시 메트릭용
