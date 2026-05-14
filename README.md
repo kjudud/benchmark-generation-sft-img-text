@@ -58,30 +58,51 @@ export OPENAI_API_KEY="sk-..."
 
 ## 파이프라인
 
-### TRAIN
-### 1. 데이터셋 준비
-
+## TRAIN
+### 1. TRAIN 데이터셋 준비
+Qwen3-VL-train 가상환경에서 실행
 학습 단계에서만 필요. kopub 데이터 변환 과정. 테스트 시에는 pdf 파일을 1단계의 OCR 처리 수행 해서 사용.
 
 ```bash
 # 원본 데이터셋 구조 확인
 python scripts/dataset/check_sds_kopub.py
+```
 
-# GPT로 question_type 컬럼 추가 → datasets/SDS-KoPub-with-question-types/
+### 1.1 GPT로 question_type 컬럼 추가 → datasets/SDS-KoPub-with-question-types/
+
+```bash
+# Qwen3-VL-train 가상환경에서 실행
 python scripts/dataset/add_question_types.py
+```
 
-# OCR 결과 결합 → datasets/SDS-KoPub-with-question-types-and-ocr/ (최종 학습 데이터셋)
+### 1.2 OCR 처리
+⚠️ 이 단계만 deepseek-ocr 가상환경에서 실행, 그 외는 Qwen3-VL-train 가상환경에서 실행
+SDS-KoPub-VDR의 corpus PDF를 페이지별로 OCR하여 `ocr_output/`에 저장합니다.
+```bash
+python scripts/ocr/process_ocr.py
+
+
+테스트용 pdf ocr(step4,5에서 ragas 성능 비교에서 사용)
+```bash
+python scripts/ocr/process_ocr.py --input-dir <PDF_디렉토리> --output-dir ocr_output
+```
+
+### 1.3 OCR 결과 결합 → datasets/SDS-KoPub-with-question-types-and-ocr/ (최종 학습 데이터셋)
+```bash
 python scripts/dataset/create_dataset_from_ocr.py
 
+### 마이너 기능
 # 데이터셋 확인
 python scripts/dataset/check_training_dataset.py
 python scripts/analyze/check_long_samples.py
-
-# ocr 오류난 파일 filter
-python filter_samples.py --indeices 313 344
 ```
 
-### 2. LoRA 학습
+### 1.4 ocr 오류난 파일 filter
+```bash
+python scripts/dataset/filter_samples.py --indices 313 344
+```
+
+## 2. LoRA 학습
 
 ```bash
 #8B 모델 unsloth 사용 단일 gpu
@@ -92,24 +113,19 @@ python scripts/train/qwen3_vl_32b_training.py
 
 학습된 어댑터는 `models/qwen3-vl-8b-sft/`에 저장됩니다.
 
-### TEST
+## TEST
+### 3. 테스트 데이터 OCR 처리
 ! 주의사항. 각 단계에서 input, output 파일명 맞춰서 수행.(ex OCR 처리 단계계 output-dir과 추론 단계 --input-dir 일치 시켜야함.)
-### 1. OCR 처리
-
-SDS-KoPub-VDR의 corpus PDF를 페이지별로 OCR하여 `ocr_output/`에 저장합니다.
-
 ```bash
-python scripts/ocr/process_ocr.py
-```
-
-테스트용 pdf ocr(step4,5에서 ragas 성능 비교에서 사용)
-```bash
-python scripts/ocr/process_ocr.py --input-dir <PDF_디렉토리> --output-dir ocr_output
+# ATON server 기준 경로 및 실행 파일
+python /home/aton/projects/rag-eval-framework/mmodal_generation/test_ocr_processor.py \
+  --pdf-dir "/home/aton/projects/00.Qwen3-VL-train copy/test_data/VS_원천데이터1(pdf)_08. 보건의료_pdf"
+  --pdfs-to-img-dir "/home/jy/projects_wsl/02.RAG-eval-framework/mmodal_generation/pdfs_to_img/VS_원천데이터1(pdf)_08. 보건의료"
+  --output-dir "/home/aton/projects/00.Qwen3-VL-train copy/test_data/VS_원천데이터1(pdf)_08. 보건의료"
 ```
 
 
-### 2. 추론
-
+### 4. TEST셋 inference
 ```bash
 # OCR 처리가 수행된 데이터셋에서 동작
 ### 8b 모델 inferecne
@@ -117,12 +133,12 @@ python scripts/ocr/process_ocr.py --input-dir <PDF_디렉토리> --output-dir oc
 python scripts/inference/inference_qwen3vl_lora.py \
   --input-dir "test_data/VS_원천데이터1(pdf)_08. 보건의료" \
   --model-path models/qwen3-vl-8b-sft \
-  --output-file results/lora_results.json
+  --output-file "results/VS_원천데이터1(pdf)_08. 보건의료_8b_lora_text_qa_result_1.json" 
 
 # 베이스 모델 (비교용)
 python scripts/inference/inference_qwen3vl_base.py \
   --input-dir "test_data/VS_원천데이터1(pdf)_08. 보건의료" \
-  --output-file results/base_results.json
+  --output-file "results/VS_원천데이터1(pdf)_08. 보건의료_8b_base_text_qa_result_1.json" 
 
 
 ### 32b 모델 inference
@@ -130,15 +146,15 @@ python scripts/inference/inference_qwen3vl_base.py \
 python scripts/inference/inference_qwen3vl32b_lora.py \
   --input-dir "test_data/VS_원천데이터1(pdf)_08. 보건의료" \
   --model-path models/qwen3-vl-32b-sft \
-  --output-file results/lora_32b_results.json
+  --output-file "results/VS_원천데이터1(pdf)_08. 보건의료_32b_lora_text_qa_result_1.json"
 
 # 베이스 모델 (비교용)
 python scripts/inference/inference_qwen3vl32b_base.py \
   --input-dir "test_data/VS_원천데이터1(pdf)_08. 보건의료" \
-  --output-file results/base_results.json  
+  --output-file "results/VS_원천데이터1(pdf)_08. 보건의료_32b_base_text_qa_result_1.json" 
 ```
 
-### 3. RAGAS 평가
+### 5. RAGAS 평가
 
 앞서 수행한 lora와 base 모델의 inference의 결과 파일을 RAGAS 평가 지표로로 비교하여 수행.
 

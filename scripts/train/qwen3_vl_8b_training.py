@@ -86,7 +86,7 @@ def prepare_dataset_from_qa(ds_qa):
 
 
 def main():
-    dataset_path = "datasets/SDS-KoPub-with-question-types-and-ocr"
+    dataset_path = "datasets/SDS-KoPub-with-question-types-and-ocr-filtered"
     print(f"📥 데이터셋 로드 중: {dataset_path}")
     ds_qa = load_from_disk(dataset_path)
 
@@ -95,7 +95,7 @@ def main():
     print(f"✅ 변환 완료: 총 {len(converted_dataset)}개 샘플")
 
     model, tokenizer = FastVisionModel.from_pretrained(
-        "unsloth/Qwen3-VL-32B-Instruct-unsloth-bnb-4bit",
+        "unsloth/Qwen3-VL-8B-Instruct-unsloth-bnb-4bit",
         load_in_4bit=True,  # Use 4bit to reduce memory use. False for 16bit LoRA.
         use_gradient_checkpointing="unsloth",  # True or "unsloth" for long context
     )

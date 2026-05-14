@@ -1,0 +1,12 @@
+# torch / torchvision / torchaudio는 README 순서대로 먼저 설치하세요 (--index-url https://download.pytorch.org/whl/cu118).
+# 이 파일에는 torch를 넣지 않습니다(PyPI와 cu118 wheel이 섞여 CUDA 버전 불일치가 나는 것을 방지).
+transformers==4.46.3
+tokenizers==0.20.3
+einops
+addict
+easydict
+pymupdf
+pillow
+matplotlib
+# flash-attn: pip requirements 문법이 아니므로 아래는 주석으로만 둠(CUDA·빌드 필요, torch 설치 후 실행).
+#   pip install flash-attn==2.7.3 --no-build-isolation
